@@ -1,4 +1,4 @@
-# JCL (JSON Conversion Lib)
+# JOCL (JSON Object Conversion Lib)
 
 A small Python utility library that makes it easier to convert Python class instances to and from JSON objects.
 
@@ -17,7 +17,7 @@ This example shows the basic conversion flow in both directions.
 `to_json_object()` converts a class instance into a JSON object, and `from_json_object()` builds a class instance from a JSON object.
 ```python
 from dataclasses import dataclass
-from jcl import JsonObject, JsonObjectConvertible
+from jocl import JsonObject, JsonObjectConvertible
 
 @dataclass
 class User(JsonObjectConvertible):
@@ -55,7 +55,7 @@ It is useful when missing or invalid values should fall back to safe default val
 ```python
 from dataclasses import dataclass
 
-from jcl import (
+from jocl import (
     JsonObject,
     JsonObjectConvertible,
     get_bool,
@@ -92,7 +92,7 @@ It is useful when input data must have the expected fields and types, and invali
 ```python
 from dataclasses import dataclass
 
-from jcl import (
+from jocl import (
     JsonObject,
     JsonObjectConvertible,
     require_bool,
@@ -129,7 +129,7 @@ It is useful when one class contains other `JsonObjectConvertible` objects, such
 ```python
 from dataclasses import dataclass, field
 
-from jcl import (
+from jocl import (
     JsonObject,
     JsonObjectConvertible,
     convert_convertibles_to_json_objects,
@@ -228,10 +228,10 @@ print(loaded_user)
 
 ## Installation
 
-Copy `jcl.py` into your project and import what you need.
+Copy `jocl.py` into your project and import what you need.
 
 ```python
-from jcl import JsonObject, JsonObjectConvertible
+from jocl import JsonObject, JsonObjectConvertible
 ```
 
 ## Requirements
