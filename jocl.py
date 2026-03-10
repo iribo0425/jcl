@@ -170,16 +170,39 @@ class JsonValueContext(object):
             logger=self.get_logger()
         )
 
-def _log_get_failure(ctx: JsonValueContext, reason: str, *, value: object = None, exc: Optional[Exception] = None) -> None:
+_MISSING_LOG_VALUE: object = object()
+
+def _format_json_location(path: JsonValuePath) -> str:
+    pointer: str = _json_value_path_to_pointer(path)
+    return pointer if pointer else "<root>"
+
+def _get_exception_reason(exc: BaseException) -> str:
+    if exc.args:
+        try:
+            return str(exc.args[0])
+        except Exception:
+            pass
+
+    return exc.__class__.__name__
+
+def _log_get_failure(ctx: JsonValueContext, reason: str, *, value: object = _MISSING_LOG_VALUE, exc: Optional[Exception] = None) -> None:
     logger: Optional[logging.Logger] = ctx.get_logger()
 
     if logger is None:
         return
 
-    if exc is None:
-        logger.warning("JSON get fallback at %s: %s; value=%r", ctx.get_path(), reason, value)
+    location: str = _format_json_location(ctx.get_path())
+
+    if value is _MISSING_LOG_VALUE:
+        if exc is None:
+            logger.warning("JSON get fallback at %s: %s", location, reason)
+        else:
+            logger.warning("JSON get fallback at %s: %s; exc_type=%s; exc=%s", location, reason, type(exc).__name__, exc)
     else:
-        logger.warning("JSON get fallback at %s: %s; value=%r; exc=%s", ctx.get_path(), reason, value, exc)
+        if exc is None:
+            logger.warning("JSON get fallback at %s: %s; value=%r", location, reason, value)
+        else:
+            logger.warning("JSON get fallback at %s: %s; value=%r; exc_type=%s; exc=%s", location, reason, value, type(exc).__name__, exc)
 
 T_JsonObjectConvertible = TypeVar("T_JsonObjectConvertible", bound="JsonObjectConvertible")
 class JsonObjectConvertible(abc.ABC):
@@ -282,11 +305,10 @@ class JsonValueError(ValueError):
         Returns:
             A message that includes both the failure reason and a JSON Pointer-like path.
         """
-        reason: str = str(self.args[0]) if self.args else self.__class__.__name__
+        reason: str = _get_exception_reason(self)
 
         try:
-            pointer: str = _json_value_path_to_pointer(self.__path)
-            at: str = pointer if pointer else "<root>"
+            at: str = _format_json_location(self.__path)
         except Exception as e:
             try:
                 path_repr = repr(self.__path)
@@ -330,7 +352,7 @@ def validate_json_primitive(ctx: JsonValueContext, x: object) -> None:
 
         raise JsonValueError(f"Non-finite float: {x!r}", ctx.get_path())
 
-    raise JsonValueError(f"Invalid primitive: {type(x).__name__} value={x!r}", ctx.get_path())
+    raise JsonValueError(f"Expected JSON primitive, got {type(x).__name__}", ctx.get_path())
 
 @dataclass(frozen=True)
 class _StackItem:
@@ -369,7 +391,7 @@ def validate_json_value(ctx: JsonValueContext, x: object) -> None:
             continue
 
         if item.depth > ctx.get_max_depth():
-            raise JsonValueError(f"Max depth exceeded (depth={item.depth} > {ctx.get_max_depth()})", item.path)
+            raise JsonValueError(f"JSON max depth exceeded: depth={item.depth} > max_depth={ctx.get_max_depth()}", item.path)
 
         if isinstance(item.value, dict):
             # Pylance strict cannot infer the precise type here.
@@ -474,7 +496,7 @@ def dump_convertible(ctx: JsonValueContext, convertible: JsonObjectConvertible, 
     try:
         validate_json_object(ctx, o)
     except JsonValueError as e:
-        raise TypeError(f"Invalid JSON produced by {type(convertible).__name__} when writing {path}: {e}") from e
+        raise TypeError(f"Invalid JSON object produced by {type(convertible).__name__} for {path}: {e}") from e
 
     s: str = json.dumps(o, ensure_ascii=False, allow_nan=False, indent=4, sort_keys=True)
     path.write_text(s, encoding="utf-8")
@@ -483,7 +505,7 @@ def _parse_float(s: str) -> float:
     f: float = float(s)
 
     if not math.isfinite(f):
-        raise ValueError(f"Non-finite float: {s}")
+        raise ValueError(f"Non-finite float: {s!r}")
 
     return f
 
@@ -515,12 +537,12 @@ def load_convertible(ctx: JsonValueContext, cls: type[T], path: pathlib.Path) ->
     try:
         o = json.loads(s, parse_float=_parse_float, parse_constant=_parse_constant)
     except (json.JSONDecodeError, ValueError) as e:
-        raise ValueError(f"Failed to parse JSON in {path}: {e}") from e
+        raise ValueError(f"Failed to parse JSON from {path}: {e}") from e
 
     try:
         validate_json_object(ctx, o)
     except JsonValueError as e:
-        raise TypeError(f"Invalid JSON in {path}: {e}") from e
+        raise TypeError(f"Invalid JSON object in {path}: {e}") from e
 
     try:
         return cls.from_json_object(ctx, cast(JsonObject, o))
@@ -609,7 +631,7 @@ def get_float(ctx: JsonValueContext, json_object: JsonObject, key: str, *, defau
         try:
             return float(cast(int, value))
         except OverflowError as e:
-            _log_get_failure(child_ctx, "Integer too large to convert to float", value=value, e=e)
+            _log_get_failure(child_ctx, "Integer too large to convert to float", value=value, exc=e)
             return default
 
     if isinstance(value, float):
@@ -671,7 +693,7 @@ def get_primitive(ctx: JsonValueContext, json_object: JsonObject, key: str, *, d
     try:
         validate_json_primitive(child_ctx, value)
     except JsonValueError as e:
-        _log_get_failure(child_ctx, "Invalid JSON primitive", value=value, e=e)
+        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
         return default
 
     return cast(JsonPrimitive, value)
@@ -699,7 +721,7 @@ def get_value(ctx: JsonValueContext, json_object: JsonObject, key: str, *, defau
     try:
         validate_json_value(child_ctx, value)
     except JsonValueError as e:
-        _log_get_failure(child_ctx, "Invalid JSON value", value=value, e=e)
+        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
         return default
 
     return cast(JsonValue, value)
@@ -739,7 +761,7 @@ def get_object(ctx: JsonValueContext, json_object: JsonObject, key: str, *, defa
     try:
         validate_json_object(child_ctx, value)
     except JsonValueError as e:
-        _log_get_failure(child_ctx, "Invalid JSON object", value=value, e=e)
+        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
     return cast(JsonObject, value)
@@ -767,7 +789,7 @@ def get_array(ctx: JsonValueContext, json_object: JsonObject, key: str, *, defau
     try:
         validate_json_array(child_ctx, value)
     except JsonValueError as e:
-        _log_get_failure(child_ctx, "Invalid JSON array", value=value, e=e)
+        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
     return cast(JsonArray, value)
@@ -800,7 +822,7 @@ def get_convertible(ctx: JsonValueContext, json_object: JsonObject, key: str, cl
         validate_json_object(child_ctx, value)
         return cls.from_json_object(child_ctx, cast(JsonObject, value))
     except (JsonValueError, TypeError, ValueError) as e:
-        _log_get_failure(child_ctx, f"Failed to deserialize {cls.__name__}", value=value, e=e)
+        _log_get_failure(child_ctx, f"Failed to deserialize {cls.__name__}", value=value, exc=e)
         return factory()
 
 def get_convertibles(ctx: JsonValueContext, json_object: JsonObject, key: str, cls: type[T_Convertible], *, default_factory: Factory[list[T_Convertible]] = list) -> list[T_Convertible]:
@@ -827,7 +849,7 @@ def get_convertibles(ctx: JsonValueContext, json_object: JsonObject, key: str, c
     try:
         validate_json_array(array_ctx, value)
     except JsonValueError as e:
-        _log_get_failure(array_ctx, "Invalid JSON array", value=value, e=e)
+        _log_get_failure(array_ctx, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
     try:
@@ -840,7 +862,7 @@ def get_convertibles(ctx: JsonValueContext, json_object: JsonObject, key: str, c
 
         return convertibles
     except (JsonValueError, TypeError, ValueError) as e:
-        _log_get_failure(array_ctx, f"Failed to deserialize list[{cls.__name__}]", value=value, e=e)
+        _log_get_failure(array_ctx, f"Failed to deserialize list[{cls.__name__}]", value=value, exc=e)
         return default_factory()
 
 def _require_value(ctx: JsonValueContext, json_object: JsonObject, key: str) -> object:
@@ -1116,7 +1138,7 @@ def convert_convertible_to_json_object(ctx: JsonValueContext, key: str, converti
     try:
         validate_json_object(child_ctx, json_object)
     except JsonValueError as e:
-        raise TypeError(f"Invalid JSON produced for key {key!r} ({type(convertible).__name__}): {e}") from e
+        raise TypeError(f"Invalid JSON object produced by {type(convertible).__name__} for key {key!r}: {e}") from e
 
     return json_object
 
@@ -1149,7 +1171,7 @@ def convert_convertibles_to_json_objects(ctx: JsonValueContext, key: str, conver
         try:
             validate_json_object(item_ctx, json_object)
         except JsonValueError as e:
-            raise TypeError(f"Invalid JSON produced by element {i} ({type(convertible).__name__}): {e}") from e
+            raise TypeError(f"Invalid JSON object produced by element {i} ({type(convertible).__name__}) for key {key!r}: {e}") from e
 
         json_objects.append(json_object)
 
