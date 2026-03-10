@@ -1,134 +1,101 @@
 # JOCL (JSON Object Conversion Lib)
 
-A small Python utility library that makes it easier to convert Python class instances to and from JSON objects.
+A small utility library for converting Python class instances to and from JSON objects.
 
 With this library, you can:
-- convert class instances into JSON-compatible dictionaries
-- rebuild class instances from JSON objects
+- convert class instances into JSON objects
+- reconstruct class instances from JSON objects
 - validate JSON values before saving or loading
 - read and write JSON files safely
-- locate errors inside nested JSON data more easily
+- locate errors in nested JSON data more easily
 
 ## Examples
 
-### Minimal Example
+### Basic Usage
 
-This example shows the basic conversion flow in both directions.
-`to_json_object()` converts a class instance into a JSON object, and `from_json_object()` builds a class instance from a JSON object.
+This example shows the basic workflow: convert an instance to a JSON object, write it to a JSON file, and load it back into a class instance.
+It uses the `get_*` helpers during deserialization to provide default values when fields are missing or invalid.
+
 ```python
 from dataclasses import dataclass
-from jocl import JsonObject, JsonObjectConvertible, JsonValueContext
+from pathlib import Path
+from jocl import (
+    JsonContext,
+    JsonObject,
+    JsonObjectConvertible,
+    dump_convertible,
+    get_int,
+    get_str,
+    load_convertible,
+)
+
 
 @dataclass
 class User(JsonObjectConvertible):
-    name: str
-    age: int
+    name: str = ""
+    age: int = 0
 
-    def to_json_object(self, ctx: JsonValueContext) -> JsonObject:
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
         return {
             "name": self.name,
             "age": self.age,
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonValueContext, json_object: JsonObject) -> "User":
+    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "User":
         return cls(
-            name=json_object["name"],
-            age=json_object["age"],
+            name=get_str(ctx, json_object, "name", default=""),
+            age=get_int(ctx, json_object, "age", default=0),
         )
 
-ctx = JsonValueContext()
-user = User(name="Alice", age=30)
+    @classmethod
+    def create_default(cls) -> "User":
+        return cls()
 
+
+ctx = JsonContext()
+user = User(name="Alice", age=30)
+path = Path("user.json")
+
+# Convert the instance to a JSON object.
 json_object = user.to_json_object(ctx)
 print(json_object)
 # {'name': 'Alice', 'age': 30}
 
-loaded_user = User.from_json_object(ctx, json_object)
+# Write the instance to a JSON file.
+dump_convertible(ctx, user, path)
+
+# Load the instance back from the JSON file.
+loaded_user = load_convertible(ctx, User, path)
 print(loaded_user)
 # User(name='Alice', age=30)
 ```
 
-### Tolerant Deserialization
+For strict validation, use the following version of `from_json_object()`:
 
-This example uses the `get_*` helpers to read values with defaults.
-It is useful when missing or invalid values should fall back to safe default values instead of raising an error.
 ```python
-from dataclasses import dataclass
-from jocl import JsonObject, JsonObjectConvertible, JsonValueContext, get_bool, get_int, get_str
+from jocl import require_int, require_str
 
-@dataclass
-class UserSettings(JsonObjectConvertible):
-    theme: str = "dark"
-    max_item_count: int = 20
-    show_tips: bool = True
-
-    def to_json_object(self, ctx: JsonValueContext) -> JsonObject:
-        return {
-            "theme": self.theme,
-            "max_item_count": self.max_item_count,
-            "show_tips": self.show_tips,
-        }
-
-    @classmethod
-    def from_json_object(cls, ctx: JsonValueContext, json_object: JsonObject) -> "UserSettings":
-        return cls(
-            theme=get_str(ctx, json_object, "theme", default="dark"),
-            max_item_count=get_int(ctx, json_object, "max_item_count", default=20),
-            show_tips=get_bool(ctx, json_object, "show_tips", default=True),
-        )
-
-ctx = JsonValueContext()
-user_settings = UserSettings.from_json_object(ctx, {"theme": "light"})
-print(user_settings)
-# UserSettings(theme='light', max_item_count=20, show_tips=True)
-```
-
-### Strict Deserialization
-
-This example uses the `require_*` helpers to read required values.
-It is useful when input data must have the expected fields and types, and invalid input should immediately raise an error.
-```python
-from dataclasses import dataclass
-from jocl import JsonObject, JsonObjectConvertible, JsonValueContext, require_bool, require_int, require_str
-
-@dataclass
-class User(JsonObjectConvertible):
-    name: str
-    age: int
-    active: bool
-
-    def to_json_object(self, ctx: JsonValueContext) -> JsonObject:
-        return {
-            "name": self.name,
-            "age": self.age,
-            "active": self.active,
-        }
-
-    @classmethod
-    def from_json_object(cls, ctx: JsonValueContext, json_object: JsonObject) -> "User":
-        return cls(
-            name=require_str(ctx, json_object, "name"),
-            age=require_int(ctx, json_object, "age"),
-            active=require_bool(ctx, json_object, "active"),
-        )
-
-ctx = JsonValueContext()
-user = User.from_json_object(ctx, {"name": "Alice", "age": 30, "active": True})
-print(user)
-# User(name='Alice', age=30, active=True)
+@classmethod
+def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "User":
+    return cls(
+        name=require_str(ctx, json_object, "name"),
+        age=require_int(ctx, json_object, "age"),
+    )
 ```
 
 ### Nested Objects and Lists
 
 This example shows how to deserialize nested objects and lists of objects.
-It is useful when one class contains other `JsonObjectConvertible` objects, such as an address object or a list of tags.
+It is useful when a class contains other `JsonObjectConvertible` objects, such as an address object or a list of tags.
+
 ```python
 from dataclasses import dataclass, field
 from jocl import (
+    JsonContext,
     JsonObject,
     JsonObjectConvertible,
-    JsonValueContext,
+    convert_convertible_to_json_object,
     convert_convertibles_to_json_objects,
     get_convertible,
     get_convertibles,
@@ -140,56 +107,68 @@ class Address(JsonObjectConvertible):
     city: str = ""
     country: str = ""
 
-    def to_json_object(self, ctx: JsonValueContext) -> JsonObject:
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
         return {
             "city": self.city,
             "country": self.country,
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonValueContext, json_object: JsonObject) -> "Address":
+    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "Address":
         return cls(
             city=get_str(ctx, json_object, "city", default=""),
             country=get_str(ctx, json_object, "country", default=""),
         )
 
+    @classmethod
+    def create_default(cls) -> "Address":
+        return cls()
+
 @dataclass
 class Tag(JsonObjectConvertible):
     name: str = ""
 
-    def to_json_object(self, ctx: JsonValueContext) -> JsonObject:
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
         return {
             "name": self.name,
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonValueContext, json_object: JsonObject) -> "Tag":
+    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "Tag":
         return cls(
             name=get_str(ctx, json_object, "name", default=""),
         )
+
+    @classmethod
+    def create_default(cls) -> "Tag":
+        return cls()
 
 @dataclass
 class User(JsonObjectConvertible):
     name: str = ""
-    address: Address = field(default_factory=Address)
+    address: Address = field(default_factory=Address.create_default)
     tags: list[Tag] = field(default_factory=list)
 
-    def to_json_object(self, ctx: JsonValueContext) -> JsonObject:
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
         return {
             "name": self.name,
-            "address": self.address.to_json_object(ctx.create_child("address")),
-            "tags": convert_convertibles_to_json_objects(ctx.create_child("tags"), self.tags),
+            "address": convert_convertible_to_json_object(ctx, "address", self.address),
+            "tags": convert_convertibles_to_json_objects(ctx, "tags", self.tags),
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonValueContext, json_object: JsonObject) -> "User":
+    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "User":
         return cls(
             name=get_str(ctx, json_object, "name", default=""),
-            address=get_convertible(ctx, json_object, "address", Address, Address),
+            address=get_convertible(ctx, json_object, "address", Address),
             tags=get_convertibles(ctx, json_object, "tags", Tag),
         )
 
-ctx = JsonValueContext()
+    @classmethod
+    def create_default(cls) -> "User":
+        return cls()
+
+ctx = JsonContext()
 user = User(
     name="Alice",
     address=Address(city="Tokyo", country="Japan"),
@@ -223,7 +202,7 @@ from jocl import JsonObject, JsonObjectConvertible
 
 ## Requirements
 
-- Python 3.9.7+
+- Python 3.9+
 
 ## License
 
