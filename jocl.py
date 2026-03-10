@@ -292,7 +292,7 @@ def validate_json_primitive(ctx: JsonValueContext, x: object) -> None:
     if isinstance(x, str):
         return
 
-    if isinstance(x, int):
+    if _is_strict_int(x):
         return
 
     if isinstance(x, float):
@@ -1023,26 +1023,59 @@ def require_convertibles(ctx: JsonValueContext, json_object: JsonObject, key: st
 
     return convertibles
 
-def convert_convertibles_to_json_objects(ctx: JsonValueContext, convertibles: Iterable[JsonObjectConvertible]) -> list[JsonObject]:
-    """Converts convertibles to JSON objects.
+def convert_convertible_to_json_object(ctx: JsonValueContext, key: str, convertible: JsonObjectConvertible) -> JsonObject:
+    """Converts a convertible to a JSON object.
 
-    Each produced JSON object is validated with its element index appended to ``ctx`` so that failures point to the offending element.
+    The object returned by ``to_json_object()`` is validated with ``key`` appended to ``ctx`` so that failures point to the correct location.
     Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
 
     Args:
         ctx: Current path context.
+        key: Key associated with the convertible in the parent JSON object.
+        convertible: Convertible to serialize.
+
+    Returns:
+        A validated JSON object.
+
+    Raises:
+        TypeError: Raised when the produced value is not a valid JSON object.
+        ValueError: Raised when ``to_json_object()`` fails with an invalid value.
+    """
+    child_ctx: JsonValueContext = ctx.create_child(key)
+
+    json_object: JsonObject = convertible.to_json_object(child_ctx)
+
+    try:
+        validate_json_object(child_ctx, json_object)
+    except JsonValueError as e:
+        raise TypeError(f"Invalid JSON produced for key {key!r} ({type(convertible).__name__}): {e}") from e
+
+    return json_object
+
+def convert_convertibles_to_json_objects(ctx: JsonValueContext, key: str, convertibles: Iterable[JsonObjectConvertible]) -> list[JsonObject]:
+    """Converts convertibles to JSON objects.
+
+    Each object returned by ``to_json_object()`` is validated with both ``key`` and the element index appended to ``ctx`` so that failures point to the offending element.
+    Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
+
+    Args:
+        ctx: Current path context.
+        key: Key associated with the convertible list in the parent JSON object.
         convertibles: Convertibles to serialize.
 
     Returns:
         A list of validated JSON objects.
 
     Raises:
-        TypeError: Raised when any element produces an invalid JSON object.
+        TypeError: Raised when any produced value is not a valid JSON object.
+        ValueError: Raised when element serialization fails with an invalid value.
     """
+    child_ctx: JsonValueContext = ctx.create_child(key)
+
     json_objects: list[JsonObject] = []
 
     for i, convertible in enumerate(convertibles):
-        item_ctx: JsonValueContext = ctx.create_child(i)
+        item_ctx: JsonValueContext = child_ctx.create_child(i)
         json_object: JsonObject = convertible.to_json_object(item_ctx)
 
         try:
@@ -1095,6 +1128,7 @@ __all__ = [
     "require_array",
     "require_convertible",
     "require_convertibles",
+    "convert_convertible_to_json_object",
     "convert_convertibles_to_json_objects",
     "append_json_value_path_part",
     "JsonValueContext",
