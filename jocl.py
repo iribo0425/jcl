@@ -1050,9 +1050,30 @@ def get_convertible(ctx: JsonContext, json_object: JsonObject, key: str, cls: ty
 
     try:
         validate_json_object(child_ctx, value)
+    except JsonError as e:
+        error_ctx: JsonContext = JsonContext(
+            path=e.get_path(),
+            max_depth=ctx.get_max_depth(),
+            issues=ctx.get_issues(),
+            max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+        )
+
+        issue_value: object = value if e.get_path() == child_ctx.get_path() else _MISSING_ISSUE_VALUE
+        _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+        return factory()
+
+    try:
         return cls.from_json_object(child_ctx, cast(JsonObject, value))
     except JsonError as e:
-        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
+        error_ctx = JsonContext(
+            path=e.get_path(),
+            max_depth=ctx.get_max_depth(),
+            issues=ctx.get_issues(),
+            max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+        )
+
+        issue_value = value if e.get_path() == child_ctx.get_path() else _MISSING_ISSUE_VALUE
+        _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
         return factory()
     except (TypeError, ValueError) as e:
         _record_get_issue(child_ctx, JsonIssueCode.DESERIALIZATION_FAILED, f"Failed to deserialize {cls.__name__}", value=value, exc=e)
@@ -1087,21 +1108,45 @@ def get_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cls: t
         _record_get_issue(array_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
-    try:
-        convertibles: list[T_Convertible] = []
+    convertibles: list[T_Convertible] = []
 
-        for i, item in enumerate(cast(JsonArray, value)):
-            item_ctx: JsonContext = array_ctx.create_child(i)
+    for i, item in enumerate(cast(JsonArray, value)):
+        item_ctx: JsonContext = array_ctx.create_child(i)
+
+        try:
             validate_json_object(item_ctx, item)
-            convertibles.append(cls.from_json_object(item_ctx, cast(JsonObject, item)))
+        except JsonError as e:
+            error_ctx: JsonContext = JsonContext(
+                path=e.get_path(),
+                max_depth=ctx.get_max_depth(),
+                issues=ctx.get_issues(),
+                max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+            )
 
-        return convertibles
-    except JsonError as e:
-        _record_get_issue(array_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
-        return default_factory()
-    except (TypeError, ValueError) as e:
-        _record_get_issue(array_ctx, JsonIssueCode.DESERIALIZATION_FAILED, f"Failed to deserialize list[{cls.__name__}]", value=value, exc=e)
-        return default_factory()
+            issue_value: object = item if e.get_path() == item_ctx.get_path() else _MISSING_ISSUE_VALUE
+            _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+            return default_factory()
+
+        try:
+            convertible: T_Convertible = cls.from_json_object(item_ctx, cast(JsonObject, item))
+        except JsonError as e:
+            error_ctx = JsonContext(
+                path=e.get_path(),
+                max_depth=ctx.get_max_depth(),
+                issues=ctx.get_issues(),
+                max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+            )
+
+            issue_value = item if e.get_path() == item_ctx.get_path() else _MISSING_ISSUE_VALUE
+            _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+            return default_factory()
+        except (TypeError, ValueError) as e:
+            _record_get_issue(item_ctx, JsonIssueCode.DESERIALIZATION_FAILED, f"Failed to deserialize {cls.__name__}", value=item, exc=e)
+            return default_factory()
+
+        convertibles.append(convertible)
+
+    return convertibles
 
 def _require_value(ctx: JsonContext, json_object: JsonObject, key: str) -> object:
     child_ctx: JsonContext = ctx.create_child(key)
