@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 import abc
+import enum
 import json
-import logging
 import math
 import pathlib
-from dataclasses import dataclass
 from typing import cast, ClassVar, Iterable, NoReturn, Optional, Protocol, TypeVar, Union
 
 def _is_strict_int(x: object) -> bool:
@@ -98,6 +97,139 @@ def append_json_value_path_part(path: JsonValuePath, part: JsonValuePathPart) ->
     _validate_json_value_path_part(part)
     return path + (part,)
 
+class JsonIssueSeverity(enum.Enum):
+    """Severity level for a JSON issue."""
+    ERROR = enum.auto()
+    WARNING = enum.auto()
+    NOTE = enum.auto()
+
+class JsonIssueCode(enum.Enum):
+    """Machine-readable code for a JSON issue."""
+    MISSING_KEY = enum.auto()
+    INVALID_TYPE = enum.auto()
+    INVALID_VALUE = enum.auto()
+    VALUE_CONVERSION_FAILED = enum.auto()
+    DESERIALIZATION_FAILED = enum.auto()
+
+class JsonIssue(object):
+    """Structured information about a JSON-related issue worth keeping for later inspection."""
+
+    def __init__(
+        self,
+        path: JsonValuePath,
+        severity: JsonIssueSeverity,
+        code: JsonIssueCode,
+        message: str,
+        value_type_name: Optional[str] = None,
+        value_repr: Optional[str] = None,
+        exception_type_name: Optional[str] = None,
+        exception_message: Optional[str] = None,
+    ):
+        super(JsonIssue, self).__init__()
+
+        _validate_json_value_path(path)
+
+        self.__path: JsonValuePath = path
+        self.__severity: JsonIssueSeverity = severity
+        self.__code: JsonIssueCode = code
+        self.__message: str = message
+        self.__value_type_name: Optional[str] = value_type_name
+        self.__value_repr: Optional[str] = value_repr
+        self.__exception_type_name: Optional[str] = exception_type_name
+        self.__exception_message: Optional[str] = exception_message
+
+    def get_path(self) -> JsonValuePath:
+        """Returns the JSON path associated with this issue."""
+        return self.__path
+
+    def get_severity(self) -> JsonIssueSeverity:
+        """Returns the issue severity."""
+        return self.__severity
+
+    def get_code(self) -> JsonIssueCode:
+        """Returns the issue code."""
+        return self.__code
+
+    def get_message(self) -> str:
+        """Returns the human-readable message."""
+        return self.__message
+
+    def get_value_type_name(self) -> Optional[str]:
+        """Returns the observed value type name, if available."""
+        return self.__value_type_name
+
+    def get_value_repr(self) -> Optional[str]:
+        """Returns the formatted value representation, if available."""
+        return self.__value_repr
+
+    def get_exception_type_name(self) -> Optional[str]:
+        """Returns the exception type name, if available."""
+        return self.__exception_type_name
+
+    def get_exception_message(self) -> Optional[str]:
+        """Returns the exception message, if available."""
+        return self.__exception_message
+
+    def get_pointer(self) -> str:
+        """Returns the issue path as a JSON Pointer-like string."""
+        pointer: str = _json_value_path_to_pointer(self.get_path())
+        return pointer if pointer else "<root>"
+
+    def has_value(self) -> bool:
+        """Returns whether this issue contains information about the observed value."""
+        return self.__value_type_name is not None or self.__value_repr is not None
+
+    def has_exception(self) -> bool:
+        """Returns whether this issue contains exception information."""
+        return self.__exception_type_name is not None or self.__exception_message is not None
+
+    def matches_path_prefix(self, prefix: JsonValuePath) -> bool:
+        """Returns whether the issue path starts with ``prefix``."""
+        _validate_json_value_path(prefix)
+        return self.__path[:len(prefix)] == prefix
+
+    def to_message(self) -> str:
+        """Formats the issue as a human-readable message."""
+        parts: list[str] = [
+            f"JSON issue at {self.get_pointer()}: {self.__message}",
+            f"severity={self.__severity.name}",
+            f"code={self.__code.name}",
+        ]
+
+        if self.__value_type_name is not None:
+            parts.append(f"value_type={self.__value_type_name}")
+
+        if self.__value_repr is not None:
+            parts.append(f"value={self.__value_repr}")
+
+        if self.__exception_type_name is not None:
+            parts.append(f"exc_type={self.__exception_type_name}")
+
+        if self.__exception_message is not None:
+            parts.append(f"exc={self.__exception_message}")
+
+        return "; ".join(parts)
+
+    def __repr__(self) -> str:
+        return (
+            "JsonIssue("
+            f"path={self.__path!r}, "
+            f"severity={self.__severity!r}, "
+            f"code={self.__code!r}, "
+            f"message={self.__message!r}, "
+            f"value_type_name={self.__value_type_name!r}, "
+            f"value_repr={self.__value_repr!r}, "
+            f"exception_type_name={self.__exception_type_name!r}, "
+            f"exception_message={self.__exception_message!r})"
+        )
+
+    def __str__(self) -> str:
+        return self.to_message()
+
+def _validate_json_issue(x: object) -> None:
+    if not isinstance(x, JsonIssue):
+        raise TypeError(f"issue must be JsonIssue, got {type(x).__name__}")
+
 def _validate_max_depth(x: object) -> None:
     if not _is_strict_int(x):
         raise TypeError(f"max_depth must be int, got {type(x).__name__}")
@@ -105,66 +237,98 @@ def _validate_max_depth(x: object) -> None:
     if cast(int, x) < 0:
         raise ValueError(f"max_depth must be >= 0, got {x}")
 
-def _validate_logger(x: object) -> None:
+def _validate_max_issue_value_repr_length(x: object) -> None:
     if x is None:
         return
 
-    if not isinstance(x, logging.Logger):
-        raise TypeError(f"logger must be logging.Logger, got {type(x).__name__}")
+    if not _is_strict_int(x):
+        raise TypeError(f"max_issue_value_repr_length must be int or None, got {type(x).__name__}")
+
+    if cast(int, x) < 0:
+        raise ValueError(f"max_issue_value_repr_length must be >= 0, got {x}")
 
 class JsonContext(object):
-    """Stores path, maximum depth, and optional logging context for JSON handling."""
+    """Stores the current JSON path, maximum validation depth, issue formatting settings, and a shared issue buffer."""
 
-    def __init__(self, path: JsonValuePath = default_json_value_path(), max_depth: int = 1000, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        path: JsonValuePath = default_json_value_path(),
+        max_depth: int = 1000,
+        issues: Optional[list[JsonIssue]] = None,
+        max_issue_value_repr_length: Optional[int] = 200,
+    ):
         """Initializes a JSON context.
 
         Args:
             path: Current JSON value path.
             max_depth: Maximum allowed nesting depth for JSON values.
-            logger: Optional logger used for fallback diagnostics.
+            issues: Shared issue buffer used to collect non-fatal JSON issues.
+                If ``None``, a new empty buffer is created.
+            max_issue_value_repr_length: Maximum length of ``JsonIssue.value_repr``.
+                If ``None``, value representations are not truncated.
 
         Raises:
-            TypeError: Raised when ``path``, ``max_depth``, or ``logger`` has an invalid type.
-            ValueError: Raised when ``max_depth`` is negative or when ``path`` contains an invalid part.
+            TypeError: Raised when ``path``, ``max_depth``, or
+                ``max_issue_value_repr_length`` has an invalid type, or when
+                ``issues`` contains a non-``JsonIssue`` entry.
+            ValueError: Raised when ``max_depth`` is negative, when
+                ``max_issue_value_repr_length`` is negative, or when ``path``
+                contains an invalid part.
         """
         super(JsonContext, self).__init__()
 
         _validate_json_value_path(path)
         _validate_max_depth(max_depth)
-        _validate_logger(logger)
+        _validate_max_issue_value_repr_length(max_issue_value_repr_length)
+
+        if issues is None:
+            issues = []
+
+        for issue in issues:
+            _validate_json_issue(issue)
 
         self.__path: JsonValuePath = path
         self.__max_depth: int = max_depth
-        self.__logger: Optional[logging.Logger] = logger
+        self.__issues: list[JsonIssue] = issues
+        self.__max_issue_value_repr_length: Optional[int] = max_issue_value_repr_length
 
     def get_path(self) -> JsonValuePath:
-        """Returns the current path.
-
-        Returns:
-            The current path.
-        """
+        """Returns the current JSON path."""
         return self.__path
 
     def get_max_depth(self) -> int:
-        """Returns the maximum validation depth.
-
-        Returns:
-            The maximum validation depth.
-        """
+        """Returns the maximum validation depth."""
         return self.__max_depth
 
-    def get_logger(self) -> Optional[logging.Logger]:
-        """Returns the logger used for fallback read logging.
+    def get_issues(self) -> list[JsonIssue]:
+        """Returns the shared issue buffer."""
+        return self.__issues
 
-        Returns:
-            The configured logger, or ``None`` if fallback reads are not logged.
+    def get_max_issue_value_repr_length(self) -> Optional[int]:
+        """Returns the maximum length used for issue value representations."""
+        return self.__max_issue_value_repr_length
+
+    def add_issue(self, issue: JsonIssue) -> None:
+        """Appends an issue to the shared issue buffer.
+
+        Args:
+            issue: Issue to append.
+
+        Raises:
+            TypeError: Raised when ``issue`` is not a ``JsonIssue``.
         """
-        return self.__logger
+        _validate_json_issue(issue)
+        self.__issues.append(issue)
+
+    def clear_issues(self) -> None:
+        """Clears the shared issue buffer."""
+        self.__issues.clear()
 
     def create_child(self, path_part: JsonValuePathPart) -> "JsonContext":
         """Creates a child context for a nested path part.
 
-        The child context inherits the current maximum depth and logger.
+        The child context inherits the current maximum depth, issue formatting
+        settings, and shared issue buffer.
 
         Args:
             path_part: Object key or array index to append to the current path.
@@ -179,14 +343,11 @@ class JsonContext(object):
         return JsonContext(
             path=append_json_value_path_part(self.get_path(), path_part),
             max_depth=self.get_max_depth(),
-            logger=self.get_logger()
+            issues=self.get_issues(),
+            max_issue_value_repr_length=self.get_max_issue_value_repr_length(),
         )
 
-_MISSING_LOG_VALUE: object = object()
-
-def _format_json_location(path: JsonValuePath) -> str:
-    pointer: str = _json_value_path_to_pointer(path)
-    return pointer if pointer else "<root>"
+_MISSING_ISSUE_VALUE: object = object()
 
 def _get_exception_reason(exc: BaseException) -> str:
     if exc.args:
@@ -197,55 +358,58 @@ def _get_exception_reason(exc: BaseException) -> str:
 
     return exc.__class__.__name__
 
-def _log_get_failure(ctx: JsonContext, reason: str, *, value: object = _MISSING_LOG_VALUE, exc: Optional[Exception] = None) -> None:
-    logger: Optional[logging.Logger] = ctx.get_logger()
+def _record_get_issue(
+    ctx: JsonContext,
+    code: JsonIssueCode,
+    message: str,
+    *,
+    severity: JsonIssueSeverity = JsonIssueSeverity.WARNING,
+    value: object = _MISSING_ISSUE_VALUE,
+    exc: Optional[BaseException] = None,
+) -> None:
+    value_type_name: Optional[str] = None
+    value_repr: Optional[str] = None
 
-    if logger is None:
-        return
+    if value is not _MISSING_ISSUE_VALUE:
+        value_type_name = type(value).__name__
 
-    location: str = _format_json_location(ctx.get_path())
+        try:
+            value_repr = repr(value)
+        except Exception as e:
+            value_repr = f"<unrepresentable value ({type(e).__name__}: {e})>"
 
-    if value is _MISSING_LOG_VALUE:
-        if exc is None:
-            logger.warning("JSON get fallback at %s: %s", location, reason)
-        else:
-            logger.warning("JSON get fallback at %s: %s; exc_type=%s; exc=%s", location, reason, type(exc).__name__, exc)
-        return
+        max_length: Optional[int] = ctx.get_max_issue_value_repr_length()
 
-    max_length: int = 200
+        if ((max_length is not None)
+            and (len(value_repr) > max_length)):
+            if max_length <= 3:
+                value_repr = value_repr[:max_length]
+            else:
+                value_repr = value_repr[:max_length - 3] + "..."
 
-    try:
-        value_repr: str = repr(value)
-    except Exception as e:
-        value_repr = f"<unrepresentable value ({type(e).__name__}: {e})>"
+    exception_type_name: Optional[str] = None
+    exception_message: Optional[str] = None
 
-    if len(value_repr) > max_length:
-        value_repr = value_repr[:max_length - 3] + "..."
+    if exc is not None:
+        exception_type_name = type(exc).__name__
+        exception_message = str(exc)
 
-    value_type: str = type(value).__name__
-
-    if exc is None:
-        logger.warning(
-            "JSON get fallback at %s: %s; value_type=%s; value=%s",
-            location,
-            reason,
-            value_type,
-            value_repr,
+    ctx.add_issue(
+        JsonIssue(
+            path=ctx.get_path(),
+            severity=severity,
+            code=code,
+            message=message,
+            value_type_name=value_type_name,
+            value_repr=value_repr,
+            exception_type_name=exception_type_name,
+            exception_message=exception_message,
         )
-    else:
-        logger.warning(
-            "JSON get fallback at %s: %s; value_type=%s; value=%s; exc_type=%s; exc=%s",
-            location,
-            reason,
-            value_type,
-            value_repr,
-            type(exc).__name__,
-            exc,
-        )
+    )
 
 T_JsonObjectConvertible = TypeVar("T_JsonObjectConvertible", bound="JsonObjectConvertible")
 class JsonObjectConvertible(abc.ABC):
-    """Abstract base class for types that convert to and from JSON objects."""
+    """Abstract base class for objects that can be serialized to and deserialized from JSON objects."""
 
     @classmethod
     @abc.abstractmethod
@@ -257,7 +421,7 @@ class JsonObjectConvertible(abc.ABC):
             json_object: Source JSON object.
 
         Returns:
-            A newly constructed instance.
+            A newly created instance.
 
         Raises:
             JsonError: Raised when required JSON data is missing or when a JSON value is invalid.
@@ -274,7 +438,7 @@ class JsonObjectConvertible(abc.ABC):
             ctx: Current JSON context, including the current path.
 
         Returns:
-            A JSON-compatible object representation of this instance.
+            A JSON object representation of this instance.
 
         Raises:
             TypeError: Raised when serialization encounters a type-related error.
@@ -316,6 +480,10 @@ def _json_value_path_to_pointer(path: JsonValuePath) -> str:
 
     return "/" + "/".join(parts)
 
+def _format_json_location(path: JsonValuePath) -> str:
+    pointer: str = _json_value_path_to_pointer(path)
+    return pointer if pointer else "<root>"
+
 class JsonError(ValueError):
     """Raised when a JSON-related validation or access error occurs under this module's rules."""
 
@@ -337,19 +505,11 @@ class JsonError(ValueError):
         self.__path: JsonValuePath = path
 
     def get_path(self) -> JsonValuePath:
-        """Returns the path associated with the error.
-
-        Returns:
-            The stored path.
-        """
+        """Returns the path associated with the error."""
         return self.__path
 
     def __str__(self) -> str:
-        """Formats the error with its path.
-
-        Returns:
-            A message that includes both the failure reason and a JSON Pointer-like path.
-        """
+        """Returns the error message including the path."""
         reason: str = _get_exception_reason(self)
 
         try:
@@ -399,16 +559,31 @@ def validate_json_primitive(ctx: JsonContext, x: object) -> None:
 
     raise JsonError(f"Expected JSON primitive, got {type(x).__name__}", ctx.get_path())
 
-@dataclass(frozen=True)
-class _StackItem:
-    discard: bool
-    oid: int
-    value: object
-    depth: int
-    path: JsonValuePath
-
+class _StackItem(object):
     DUMMY_OID: ClassVar[int] = -1
     DUMMY_VALUE: ClassVar[object] = object()
+
+    def __init__(self, discard: bool, oid: int, value: object, depth: int, path: JsonValuePath):
+        self.__discard: bool = discard
+        self.__oid: int = oid
+        self.__value: object = value
+        self.__depth: int = depth
+        self.__path: JsonValuePath = path
+
+    def get_discard(self) -> bool:
+        return self.__discard
+
+    def get_oid(self) -> int:
+        return self.__oid
+
+    def get_value(self) -> object:
+        return self.__value
+
+    def get_depth(self) -> int:
+        return self.__depth
+
+    def get_path(self) -> JsonValuePath:
+        return self.__path
 
 def validate_json_value(ctx: JsonContext, x: object) -> None:
     """Validates that a value is a JSON value.
@@ -431,54 +606,61 @@ def validate_json_value(ctx: JsonContext, x: object) -> None:
     while stack:
         item: _StackItem = stack.pop()
 
-        if item.discard:
-            active_oids.discard(item.oid)
+        if item.get_discard():
+            active_oids.discard(item.get_oid())
             continue
 
-        if item.depth > ctx.get_max_depth():
-            raise JsonError(f"JSON max depth exceeded: depth={item.depth} > max_depth={ctx.get_max_depth()}", item.path)
+        if item.get_depth() > ctx.get_max_depth():
+            raise JsonError(f"JSON max depth exceeded: depth={item.get_depth()} > max_depth={ctx.get_max_depth()}", item.get_path())
 
-        if isinstance(item.value, dict):
+        if isinstance(item.get_value(), dict):
             # Pylance strict cannot infer the precise type here.
             # This cast is intentional; container contents are validated below at runtime.
-            obj: dict = cast(dict, item.value)
+            obj: dict = cast(dict, item.get_value())
 
             oid = id(obj)
 
             if oid in active_oids:
-                raise JsonError("Cycle detected (object)", item.path)
+                raise JsonError("Cycle detected (object)", item.get_path())
 
             active_oids.add(oid)
-            stack.append(_StackItem(True, oid, _StackItem.DUMMY_VALUE, item.depth, item.path))
+            stack.append(_StackItem(True, oid, _StackItem.DUMMY_VALUE, item.get_depth(), item.get_path()))
 
             items: list[tuple[object, object]] = list(obj.items())
 
             for k, v in reversed(items):
                 if not isinstance(k, str):
-                    raise JsonError(f"Non-string object key: {k!r} (type={type(k).__name__})", item.path)
+                    raise JsonError(f"Non-string object key: {k!r} (type={type(k).__name__})", item.get_path())
 
-                child_path: JsonValuePath = append_json_value_path_part(item.path, k)
-                stack.append(_StackItem(False, _StackItem.DUMMY_OID, v, item.depth + 1, child_path))
-        elif isinstance(item.value, list):
+                child_path: JsonValuePath = append_json_value_path_part(item.get_path(), k)
+                stack.append(_StackItem(False, _StackItem.DUMMY_OID, v, item.get_depth() + 1, child_path))
+
+        elif isinstance(item.get_value(), list):
             # Pylance strict cannot infer the precise type here.
             # This cast is intentional; container contents are validated below at runtime.
-            array: list = cast(list, item.value)
+            array: list = cast(list, item.get_value())
 
             oid = id(array)
 
             if oid in active_oids:
-                raise JsonError("Cycle detected (array)", item.path)
+                raise JsonError("Cycle detected (array)", item.get_path())
 
             active_oids.add(oid)
-            stack.append(_StackItem(True, oid, _StackItem.DUMMY_VALUE, item.depth, item.path))
+            stack.append(_StackItem(True, oid, _StackItem.DUMMY_VALUE, item.get_depth(), item.get_path()))
 
             for i in range(len(array) - 1, -1, -1):
-                child_path: JsonValuePath = append_json_value_path_part(item.path, i)
-                stack.append(_StackItem(False, _StackItem.DUMMY_OID, array[i], item.depth + 1, child_path))
+                child_path: JsonValuePath = append_json_value_path_part(item.get_path(), i)
+                stack.append(_StackItem(False, _StackItem.DUMMY_OID, array[i], item.get_depth() + 1, child_path))
+
         else:
             validate_json_primitive(
-                JsonContext(item.path, ctx.get_max_depth(), ctx.get_logger()),
-                item.value
+                JsonContext(
+                    path=item.get_path(),
+                    max_depth=ctx.get_max_depth(),
+                    issues=ctx.get_issues(),
+                    max_issue_value_repr_length=ctx.get_max_issue_value_repr_length()
+                ),
+                item.get_value()
             )
 
 def validate_json_object(ctx: JsonContext, x: object) -> None:
@@ -522,21 +704,21 @@ def validate_json_array(ctx: JsonContext, x: object) -> None:
     validate_json_value(ctx, x)
 
 def dump_convertible(ctx: JsonContext, convertible: JsonObjectConvertible, path: pathlib.Path) -> None:
-    """Writes a convertible to a UTF-8 JSON file.
+    """Writes an object to a UTF-8 JSON file.
 
-    The JSON object returned by ``to_json_object()`` is validated before writing so that invalid JSON objects are rejected early.
+    The JSON object returned by ``to_json_object()`` is validated before writing.
     Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
 
     Args:
         ctx: Current JSON context, including the current path.
-        convertible: Convertible to write.
+        convertible: Object to serialize.
         path: Destination file path.
 
     Returns:
         ``None``.
 
     Raises:
-        TypeError: Raised when the JSON object returned by ``to_json_object()`` is invalid.
+        TypeError: Raised when ``to_json_object()`` returns an invalid JSON object.
         OSError: Raised when writing the file fails.
     """
     o: JsonObject = convertible.to_json_object(ctx)
@@ -562,10 +744,10 @@ def _parse_constant(s: str) -> NoReturn:
 
 T = TypeVar("T", bound=JsonObjectConvertible)
 def load_convertible(ctx: JsonContext, cls: type[T], path: pathlib.Path) -> T:
-    """Loads a convertible from a JSON file.
+    """Loads and deserializes an object from a JSON file.
 
-    Parsing rejects non-finite floats and invalid JSON constants before JSON object validation and deserialization begin.
-    Deserialization errors are normalized to ``TypeError``.
+    Parsing rejects non-finite floats and invalid JSON constants before validation and deserialization begin.
+    Deserialization failures are normalized to ``TypeError``.
 
     Args:
         ctx: Current JSON context, including the current path.
@@ -573,7 +755,7 @@ def load_convertible(ctx: JsonContext, cls: type[T], path: pathlib.Path) -> T:
         path: Source file path.
 
     Returns:
-        The deserialized convertible.
+        The deserialized instance.
 
     Raises:
         ValueError: Raised when JSON parsing fails.
@@ -612,13 +794,13 @@ def get_str(ctx: JsonContext, json_object: JsonObject, key: str, *, default: str
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default
 
     value: object = json_object[key]
 
     if not isinstance(value, str):
-        _log_get_failure(child_ctx, f"Expected string, got {type(value).__name__}", value=value)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_TYPE, f"Expected string, got {type(value).__name__}", value=value)
         return default
 
     return value
@@ -641,13 +823,13 @@ def get_int(ctx: JsonContext, json_object: JsonObject, key: str, *, default: int
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default
 
     value: object = json_object[key]
 
     if not _is_strict_int(value):
-        _log_get_failure(child_ctx, f"Expected integer, got {type(value).__name__}", value=value)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_TYPE, f"Expected integer, got {type(value).__name__}", value=value)
         return default
 
     return cast(int, value)
@@ -670,7 +852,7 @@ def get_float(ctx: JsonContext, json_object: JsonObject, key: str, *, default: f
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default
 
     value: object = json_object[key]
@@ -679,17 +861,17 @@ def get_float(ctx: JsonContext, json_object: JsonObject, key: str, *, default: f
         try:
             return float(cast(int, value))
         except OverflowError as e:
-            _log_get_failure(child_ctx, "Integer too large to convert to float", value=value, exc=e)
+            _record_get_issue(child_ctx, JsonIssueCode.VALUE_CONVERSION_FAILED, "Integer too large to convert to float", value=value, exc=e)
             return default
 
     if isinstance(value, float):
         if math.isfinite(value):
             return value
 
-        _log_get_failure(child_ctx, "Non-finite float", value=value)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, "Non-finite float", value=value)
         return default
 
-    _log_get_failure(child_ctx, f"Expected number, got {type(value).__name__}", value=value)
+    _record_get_issue(child_ctx, JsonIssueCode.INVALID_TYPE, f"Expected number, got {type(value).__name__}", value=value)
     return default
 
 def get_bool(ctx: JsonContext, json_object: JsonObject, key: str, *, default: bool = False) -> bool:
@@ -707,13 +889,13 @@ def get_bool(ctx: JsonContext, json_object: JsonObject, key: str, *, default: bo
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default
 
     value: object = json_object[key]
 
     if not isinstance(value, bool):
-        _log_get_failure(child_ctx, f"Expected boolean, got {type(value).__name__}", value=value)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_TYPE, f"Expected boolean, got {type(value).__name__}", value=value)
         return default
 
     return value
@@ -735,7 +917,7 @@ def get_primitive(ctx: JsonContext, json_object: JsonObject, key: str, *, defaul
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default
 
     value: object = json_object[key]
@@ -743,7 +925,7 @@ def get_primitive(ctx: JsonContext, json_object: JsonObject, key: str, *, defaul
     try:
         validate_json_primitive(child_ctx, value)
     except JsonError as e:
-        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
         return default
 
     return cast(JsonPrimitive, value)
@@ -765,7 +947,7 @@ def get_value(ctx: JsonContext, json_object: JsonObject, key: str, *, default: J
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default
 
     value: object = json_object[key]
@@ -773,7 +955,7 @@ def get_value(ctx: JsonContext, json_object: JsonObject, key: str, *, default: J
     try:
         validate_json_value(child_ctx, value)
     except JsonError as e:
-        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
         return default
 
     return cast(JsonValue, value)
@@ -783,11 +965,7 @@ class Factory(Protocol[T_co]):
     """Protocol for zero-argument factories that create default values."""
 
     def __call__(self) -> T_co:
-        """Creates a default value.
-
-        Returns:
-            A newly created default value.
-        """
+        """Creates a default value."""
         ...
 
 def get_object(ctx: JsonContext, json_object: JsonObject, key: str, *, default_factory: Factory[JsonObject] = default_json_object) -> JsonObject:
@@ -805,7 +983,7 @@ def get_object(ctx: JsonContext, json_object: JsonObject, key: str, *, default_f
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default_factory()
 
     value: object = json_object[key]
@@ -813,7 +991,7 @@ def get_object(ctx: JsonContext, json_object: JsonObject, key: str, *, default_f
     try:
         validate_json_object(child_ctx, value)
     except JsonError as e:
-        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
     return cast(JsonObject, value)
@@ -833,7 +1011,7 @@ def get_array(ctx: JsonContext, json_object: JsonObject, key: str, *, default_fa
     child_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default_factory()
 
     value: object = json_object[key]
@@ -841,44 +1019,68 @@ def get_array(ctx: JsonContext, json_object: JsonObject, key: str, *, default_fa
     try:
         validate_json_array(child_ctx, value)
     except JsonError as e:
-        _log_get_failure(child_ctx, _get_exception_reason(e), value=value, exc=e)
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
     return cast(JsonArray, value)
 
 def get_convertible(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_Convertible], *, default_factory: Optional[Factory[T_Convertible]] = None) -> T_Convertible:
-    """Gets a convertible from a JSON object.
+    """Gets and deserializes an object from a JSON object.
 
     Args:
         ctx: Current JSON context, including the current path.
         json_object: Source JSON object.
         key: Key to read.
         cls: Target type to deserialize.
-        default_factory: Factory used to create the default value.
+        default_factory: Factory used to create the default instance.
             If ``None``, ``cls.create_default`` is used.
 
     Returns:
-        The deserialized convertible, or a new default value if the key is missing,
+        The deserialized instance, or a new default instance if the key is missing,
         if the value is not a valid JSON object, or if deserialization fails.
     """
     child_ctx: JsonContext = ctx.create_child(key)
     factory: Factory[T_Convertible] = cls.create_default if default_factory is None else default_factory
 
     if key not in json_object:
-        _log_get_failure(child_ctx, "Missing key")
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return factory()
 
     value: object = json_object[key]
 
     try:
         validate_json_object(child_ctx, value)
+    except JsonError as e:
+        error_ctx: JsonContext = JsonContext(
+            path=e.get_path(),
+            max_depth=ctx.get_max_depth(),
+            issues=ctx.get_issues(),
+            max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+        )
+
+        issue_value: object = value if e.get_path() == child_ctx.get_path() else _MISSING_ISSUE_VALUE
+        _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+        return factory()
+
+    try:
         return cls.from_json_object(child_ctx, cast(JsonObject, value))
-    except (JsonError, TypeError, ValueError) as e:
-        _log_get_failure(child_ctx, f"Failed to deserialize {cls.__name__}", value=value, exc=e)
+    except JsonError as e:
+        error_ctx = JsonContext(
+            path=e.get_path(),
+            max_depth=ctx.get_max_depth(),
+            issues=ctx.get_issues(),
+            max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+        )
+
+        issue_value = value if e.get_path() == child_ctx.get_path() else _MISSING_ISSUE_VALUE
+        _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+        return factory()
+    except (TypeError, ValueError) as e:
+        _record_get_issue(child_ctx, JsonIssueCode.DESERIALIZATION_FAILED, f"Failed to deserialize {cls.__name__}", value=value, exc=e)
         return factory()
 
 def get_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_Convertible], *, default_factory: Factory[list[T_Convertible]] = list) -> list[T_Convertible]:
-    """Gets a list of convertibles from a JSON object.
+    """Gets and deserializes a list of objects from a JSON object.
 
     Args:
         ctx: Current JSON context, including the current path.
@@ -888,12 +1090,14 @@ def get_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cls: t
         default_factory: Factory used to create the default list.
 
     Returns:
-        The deserialized convertibles, or a new default list if the key is missing, if the value is not a valid JSON array, if an element is not a valid JSON object, or if deserialization fails.
+        The deserialized instances, or a new default list if the key is missing,
+        if the value is not a valid JSON array, if an element is not a valid JSON object,
+        or if deserialization fails.
     """
     array_ctx: JsonContext = ctx.create_child(key)
 
     if key not in json_object:
-        _log_get_failure(array_ctx, "Missing key")
+        _record_get_issue(array_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
         return default_factory()
 
     value: object = json_object[key]
@@ -901,21 +1105,48 @@ def get_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cls: t
     try:
         validate_json_array(array_ctx, value)
     except JsonError as e:
-        _log_get_failure(array_ctx, _get_exception_reason(e), value=value, exc=e)
+        _record_get_issue(array_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
         return default_factory()
 
-    try:
-        convertibles: list[T_Convertible] = []
+    convertibles: list[T_Convertible] = []
 
-        for i, item in enumerate(cast(JsonArray, value)):
-            item_ctx: JsonContext = array_ctx.create_child(i)
+    for i, item in enumerate(cast(JsonArray, value)):
+        item_ctx: JsonContext = array_ctx.create_child(i)
+
+        try:
             validate_json_object(item_ctx, item)
-            convertibles.append(cls.from_json_object(item_ctx, cast(JsonObject, item)))
+        except JsonError as e:
+            error_ctx: JsonContext = JsonContext(
+                path=e.get_path(),
+                max_depth=ctx.get_max_depth(),
+                issues=ctx.get_issues(),
+                max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+            )
 
-        return convertibles
-    except (JsonError, TypeError, ValueError) as e:
-        _log_get_failure(array_ctx, f"Failed to deserialize list[{cls.__name__}]", value=value, exc=e)
-        return default_factory()
+            issue_value: object = item if e.get_path() == item_ctx.get_path() else _MISSING_ISSUE_VALUE
+            _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+            return default_factory()
+
+        try:
+            convertible: T_Convertible = cls.from_json_object(item_ctx, cast(JsonObject, item))
+        except JsonError as e:
+            error_ctx = JsonContext(
+                path=e.get_path(),
+                max_depth=ctx.get_max_depth(),
+                issues=ctx.get_issues(),
+                max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
+            )
+
+            issue_value = item if e.get_path() == item_ctx.get_path() else _MISSING_ISSUE_VALUE
+            _record_get_issue(error_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=issue_value, exc=e)
+            return default_factory()
+        except (TypeError, ValueError) as e:
+            _record_get_issue(item_ctx, JsonIssueCode.DESERIALIZATION_FAILED, f"Failed to deserialize {cls.__name__}", value=item, exc=e)
+            return default_factory()
+
+        convertibles.append(convertible)
+
+    return convertibles
 
 def _require_value(ctx: JsonContext, json_object: JsonObject, key: str) -> object:
     child_ctx: JsonContext = ctx.create_child(key)
@@ -1109,7 +1340,7 @@ def require_array(ctx: JsonContext, json_object: JsonObject, key: str) -> JsonAr
     return cast(JsonArray, value)
 
 def require_convertible(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_Convertible]) -> T_Convertible:
-    """Gets a required convertible from a JSON object.
+    """Gets and deserializes a required object from a JSON object.
 
     Deserialization errors are propagated as raised by ``cls.from_json_object()``.
 
@@ -1120,7 +1351,7 @@ def require_convertible(ctx: JsonContext, json_object: JsonObject, key: str, cls
         cls: Target type to deserialize.
 
     Returns:
-        The deserialized convertible.
+        The deserialized instance.
 
     Raises:
         JsonError: Raised when the key is missing or when the stored value is not a valid JSON object.
@@ -1133,7 +1364,7 @@ def require_convertible(ctx: JsonContext, json_object: JsonObject, key: str, cls
     return cls.from_json_object(child_ctx, cast(JsonObject, value))
 
 def require_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_Convertible]) -> list[T_Convertible]:
-    """Gets a required list of convertibles from a JSON object.
+    """Gets and deserializes a required list of objects from a JSON object.
 
     Element deserialization errors are propagated as raised by ``cls.from_json_object()``.
 
@@ -1144,7 +1375,7 @@ def require_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cl
         cls: Target type used to deserialize each element.
 
     Returns:
-        The deserialized convertibles.
+        The deserialized instances.
 
     Raises:
         JsonError: Raised when the key is missing, when the stored value is not a valid JSON array, or when an element is not a valid JSON object.
@@ -1166,15 +1397,15 @@ def require_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cl
     return convertibles
 
 def convert_convertible_to_json_object(ctx: JsonContext, key: str, convertible: JsonObjectConvertible) -> JsonObject:
-    """Converts a convertible to a validated JSON object.
+    """Converts an object to a validated JSON object.
 
     The object returned by ``to_json_object()`` is validated with ``key`` appended to ``ctx`` so that failures point to the correct location.
     Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
 
     Args:
         ctx: Current JSON context, including the current path.
-        key: Key associated with the convertible in the parent JSON object.
-        convertible: Convertible to serialize.
+        key: Key associated with the object in the parent JSON object.
+        convertible: Object to serialize.
 
     Returns:
         A validated JSON object.
@@ -1195,15 +1426,15 @@ def convert_convertible_to_json_object(ctx: JsonContext, key: str, convertible: 
     return json_object
 
 def convert_convertibles_to_json_objects(ctx: JsonContext, key: str, convertibles: Iterable[JsonObjectConvertible]) -> list[JsonObject]:
-    """Converts an iterable of convertibles to validated JSON objects.
+    """Converts an iterable of objects to validated JSON objects.
 
     Each object returned by ``to_json_object()`` is validated with both ``key`` and the element index appended to ``ctx`` so that failures point to the offending element.
     Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
 
     Args:
         ctx: Current JSON context, including the current path.
-        key: Key associated with the convertible list in the parent JSON object.
-        convertibles: Convertibles to serialize.
+        key: Key associated with the object list in the parent JSON object.
+        convertibles: Objects to serialize.
 
     Returns:
         A list of validated JSON objects.
@@ -1274,4 +1505,7 @@ __all__ = [
     "convert_convertibles_to_json_objects",
     "append_json_value_path_part",
     "JsonContext",
+    "JsonIssueSeverity",
+    "JsonIssueCode",
+    "JsonIssue",
 ]
