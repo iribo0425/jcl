@@ -8,6 +8,30 @@ import math
 import pathlib
 from typing import cast, ClassVar, Iterable, NoReturn, Optional, Protocol, TypeVar, Union
 
+try:
+    StrEnum = enum.StrEnum
+except AttributeError:
+    class StrEnum(str, enum.Enum):
+        def __new__(cls: type["StrEnum"], *values: object) -> "StrEnum":
+            if len(values) == 1:
+                value = values[0]
+            else:
+                value = str(*values)
+
+            if not isinstance(value, str):
+                raise TypeError("StrEnum values must be str")
+
+            obj: "StrEnum" = str.__new__(cls, value)
+            obj._value_ = value
+            return obj
+
+        @staticmethod
+        def _generate_next_value_(name: str, start: int, count: int, last_values: list[object]) -> str:
+            return name.lower()
+
+        def __str__(self) -> str:
+            return str(self.value)
+
 def _is_strict_int(x: object) -> bool:
     return type(x) is int
 
@@ -523,6 +547,41 @@ class JsonError(ValueError):
             at = f"<invalid path ({type(e).__name__}: {e}); path={path_repr}>"
 
         return f"{reason} at {at}"
+
+T_Enum = TypeVar("T_Enum", bound=enum.Enum)
+T_IntEnum = TypeVar("T_IntEnum", bound=enum.IntEnum)
+T_StrEnum = TypeVar("T_StrEnum", bound=StrEnum)
+
+def _find_enum_member_by_value(cls: type[T_Enum], value: JsonPrimitive) -> T_Enum:
+    for member in cls:
+        if member.value is None:
+            if value is None:
+                return cast(T_Enum, member)
+            continue
+
+        if isinstance(member.value, bool):
+            if isinstance(value, bool) and (member.value == value):
+                return cast(T_Enum, member)
+            continue
+
+        if isinstance(member.value, str):
+            if isinstance(value, str) and (member.value == value):
+                return cast(T_Enum, member)
+            continue
+
+        if _is_strict_int(member.value):
+            if _is_strict_int(value) and (cast(int, member.value) == cast(int, value)):
+                return cast(T_Enum, member)
+            continue
+
+        if isinstance(member.value, float):
+            if isinstance(value, float) and math.isfinite(member.value) and (member.value == value):
+                return cast(T_Enum, member)
+            continue
+
+        raise TypeError(f"{cls.__name__}.{member.name} has non-JSON-primitive value: {member.value!r}")
+
+    raise ValueError(f"Invalid {cls.__name__} value: {value!r}")
 
 def validate_json_primitive(ctx: JsonContext, x: object) -> None:
     """Validates that a value is a JSON primitive.
@@ -1148,6 +1207,79 @@ def get_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cls: t
 
     return convertibles
 
+def get_enum(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_Enum], *, default: T_Enum) -> T_Enum:
+    """Gets an ``Enum`` member from a JSON object.
+
+    Member values must be valid JSON primitives under this module's rules.
+    ``IntEnum`` and ``StrEnum`` should use their dedicated helpers instead.
+    """
+    child_ctx: JsonContext = ctx.create_child(key)
+
+    if key not in json_object:
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
+        return default
+
+    value: object = json_object[key]
+
+    try:
+        validate_json_primitive(child_ctx, value)
+    except JsonError as e:
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), value=value, exc=e)
+        return default
+
+    try:
+        return _find_enum_member_by_value(cls, cast(JsonPrimitive, value))
+    except ValueError as e:
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, str(e), value=value, exc=e)
+        return default
+    except TypeError as e:
+        _record_get_issue(child_ctx, JsonIssueCode.DESERIALIZATION_FAILED, f"Failed to deserialize {cls.__name__}", value=value, exc=e)
+        return default
+
+def get_int_enum(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_IntEnum], *, default: T_IntEnum) -> T_IntEnum:
+    """Gets an ``IntEnum`` member from a JSON object.
+
+    Only exact ``int`` objects are accepted.
+    ``bool`` and integer subclasses are rejected.
+    """
+    child_ctx: JsonContext = ctx.create_child(key)
+
+    if key not in json_object:
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
+        return default
+
+    value: object = json_object[key]
+
+    if not _is_strict_int(value):
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_TYPE, f"Expected integer, got {type(value).__name__}", value=value)
+        return default
+
+    try:
+        return cls(cast(int, value))
+    except ValueError as e:
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, f"Invalid {cls.__name__} value: {value!r}", value=value, exc=e)
+        return default
+
+def get_str_enum(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_StrEnum], *, default: T_StrEnum) -> T_StrEnum:
+    """Gets a ``StrEnum`` member from a JSON object."""
+    child_ctx: JsonContext = ctx.create_child(key)
+
+    if key not in json_object:
+        _record_get_issue(child_ctx, JsonIssueCode.MISSING_KEY, "Missing key")
+        return default
+
+    value: object = json_object[key]
+
+    if not isinstance(value, str):
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_TYPE, f"Expected string, got {type(value).__name__}", value=value)
+        return default
+
+    try:
+        return cls(value)
+    except ValueError as e:
+        _record_get_issue(child_ctx, JsonIssueCode.INVALID_VALUE, f"Invalid {cls.__name__} value: {value!r}", value=value, exc=e)
+        return default
+
 def _require_value(ctx: JsonContext, json_object: JsonObject, key: str) -> object:
     child_ctx: JsonContext = ctx.create_child(key)
 
@@ -1396,6 +1528,56 @@ def require_convertibles(ctx: JsonContext, json_object: JsonObject, key: str, cl
 
     return convertibles
 
+def require_enum(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_Enum]) -> T_Enum:
+    """Gets a required ``Enum`` member from a JSON object.
+
+    Member values must be valid JSON primitives under this module's rules.
+    ``IntEnum`` and ``StrEnum`` should use their dedicated helpers instead.
+
+    Raises:
+        JsonError: Raised when the key is missing, when the stored value is not
+            a valid JSON primitive, or when no matching enum member exists.
+        TypeError: Raised when an enum member has a non-JSON-primitive value.
+    """
+    child_ctx: JsonContext = ctx.create_child(key)
+    value: object = _require_value(ctx, json_object, key)
+    validate_json_primitive(child_ctx, value)
+
+    try:
+        return _find_enum_member_by_value(cls, cast(JsonPrimitive, value))
+    except ValueError as e:
+        raise JsonError(str(e), child_ctx.get_path())
+
+def require_int_enum(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_IntEnum]) -> T_IntEnum:
+    """Gets a required ``IntEnum`` member from a JSON object.
+
+    Only exact ``int`` objects are accepted.
+    ``bool`` and integer subclasses are rejected.
+    """
+    child_ctx: JsonContext = ctx.create_child(key)
+    value: object = _require_value(ctx, json_object, key)
+
+    if not _is_strict_int(value):
+        raise JsonError(f"Expected integer, got {type(value).__name__}", child_ctx.get_path())
+
+    try:
+        return cls(cast(int, value))
+    except ValueError:
+        raise JsonError(f"Invalid {cls.__name__} value: {value!r}", child_ctx.get_path())
+
+def require_str_enum(ctx: JsonContext, json_object: JsonObject, key: str, cls: type[T_StrEnum]) -> T_StrEnum:
+    """Gets a required ``StrEnum`` member from a JSON object."""
+    child_ctx: JsonContext = ctx.create_child(key)
+    value: object = _require_value(ctx, json_object, key)
+
+    if not isinstance(value, str):
+        raise JsonError(f"Expected string, got {type(value).__name__}", child_ctx.get_path())
+
+    try:
+        return cls(value)
+    except ValueError:
+        raise JsonError(f"Invalid {cls.__name__} value: {value!r}", child_ctx.get_path())
+
 def convert_convertible_to_json_object(ctx: JsonContext, key: str, convertible: JsonObjectConvertible) -> JsonObject:
     """Converts an object to a validated JSON object.
 
@@ -1460,6 +1642,44 @@ def convert_convertibles_to_json_objects(ctx: JsonContext, key: str, convertible
 
     return json_objects
 
+def convert_enum_to_json_primitive(ctx: JsonContext, key: str, value: enum.Enum) -> JsonPrimitive:
+    """Converts an ``Enum`` member to a validated JSON primitive using ``member.value``."""
+    child_ctx: JsonContext = ctx.create_child(key)
+    primitive: object = value.value
+
+    try:
+        validate_json_primitive(child_ctx, primitive)
+    except JsonError as e:
+        raise TypeError(
+            f"Invalid JSON primitive produced by {type(value).__name__}.{value.name} for key {key!r}: {e}"
+        ) from e
+
+    return cast(JsonPrimitive, primitive)
+
+def convert_int_enum_to_json_int(ctx: JsonContext, key: str, value: enum.IntEnum) -> int:
+    """Converts an ``IntEnum`` member to JSON-compatible ``int``."""
+    child_ctx: JsonContext = ctx.create_child(key)
+    i: int = int(value)
+
+    try:
+        validate_json_primitive(child_ctx, i)
+    except JsonError as e:
+        raise TypeError(f"Invalid JSON integer produced by {type(value).__name__}.{value.name} for key {key!r}: {e}") from e
+
+    return i
+
+def convert_str_enum_to_json_str(ctx: JsonContext, key: str, value: StrEnum) -> str:
+    """Converts a ``StrEnum`` member to JSON-compatible ``str``."""
+    child_ctx: JsonContext = ctx.create_child(key)
+    s: str = str(value.value)
+
+    try:
+        validate_json_primitive(child_ctx, s)
+    except JsonError as e:
+        raise TypeError(f"Invalid JSON string produced by {type(value).__name__}.{value.name} for key {key!r}: {e}") from e
+
+    return s
+
 __all__ = [
     "JsonPrimitive",
     "JsonObject",
@@ -1508,4 +1728,14 @@ __all__ = [
     "JsonIssueSeverity",
     "JsonIssueCode",
     "JsonIssue",
+    "StrEnum",
+    "get_enum",
+    "get_int_enum",
+    "get_str_enum",
+    "require_enum",
+    "require_int_enum",
+    "require_str_enum",
+    "convert_enum_to_json_primitive",
+    "convert_int_enum_to_json_int",
+    "convert_str_enum_to_json_str",
 ]
