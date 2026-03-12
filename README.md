@@ -95,8 +95,8 @@ from jocl import (
     JsonContext,
     JsonObject,
     JsonObjectConvertible,
-    convert_convertible_to_json_object,
-    convert_convertibles_to_json_objects,
+    from_convertible,
+    from_convertibles,
     get_convertible,
     get_convertibles,
     get_str,
@@ -152,8 +152,8 @@ class User(JsonObjectConvertible):
     def to_json_object(self, ctx: JsonContext) -> JsonObject:
         return {
             "name": self.name,
-            "address": convert_convertible_to_json_object(ctx, "address", self.address),
-            "tags": convert_convertibles_to_json_objects(ctx, "tags", self.tags),
+            "address": from_convertible(ctx, "address", self.address),
+            "tags": from_convertibles(ctx, "tags", self.tags),
         }
 
     @classmethod
