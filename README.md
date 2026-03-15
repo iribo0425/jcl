@@ -178,25 +178,25 @@ class User(JsonObjectConvertible):
 
 ctx = JsonContext()
 
-json_object_1: JsonObject = {
+obj1: JsonObject = {
     "user_id": 1001,
     "name": "Alice",
     "address": {"city": "Tokyo", "country": "Japan"},
     "tags": [{"name": "admin"}, {"name": "developer"}],
 }
 
-json_object_2: JsonObject = {
+obj2: JsonObject = {
     "user_id": "A-1002",
     "name": "Bob",
     "address": {"city": "Osaka", "country": "Japan"},
     "tags": [{"name": "artist"}],
 }
 
-user_1 = User.from_json_object(ctx, json_object_1)
-user_2 = User.from_json_object(ctx, json_object_2)
+user1 = User.from_json_object(ctx, obj1)
+user2 = User.from_json_object(ctx, obj2)
 
-print(user_1)
-print(user_2)
+print(user1)
+print(user2)
 # User(
 #     user_id=1001,
 #     name='Alice',
