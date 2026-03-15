@@ -6,7 +6,7 @@ import enum
 import json
 import math
 import pathlib
-from typing import cast, ClassVar, Iterable, NoReturn, Optional, Protocol, TypeVar, Union
+from typing import Any, cast, ClassVar, Iterable, NoReturn, Optional, Protocol, TypeVar, Union
 
 try:
     StrEnum = enum.StrEnum
@@ -1466,7 +1466,7 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
     raise TypeError(f"Unsupported get type: {expected_type!r}")
 
 
-def get(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object, *, default: object = _MISSING_DEFAULT) -> object:
+def get(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object, *, default: object = _MISSING_DEFAULT) -> Any:
     """Reads ``key`` from a JSON object as ``type_or_types``.
 
     If the key is missing or the value cannot be read as the requested type, this function records a ``JsonIssue`` and returns either ``default`` or an inferred default value.
@@ -1522,7 +1522,7 @@ def get(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object, *, d
     return _resolve_default_value(default, types)
 
 
-def require(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object) -> object:
+def require(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object) -> Any:
     """Reads ``key`` from a JSON object as ``type_or_types``.
 
     Unlike ``get()``, this function raises an exception instead of recording an issue and returning a default value.
