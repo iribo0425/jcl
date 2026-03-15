@@ -41,10 +41,10 @@ class User(JsonObjectConvertible):
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "User":
+    def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "User":
         return cls(
-            name=get(ctx, json_object, "name", str),
-            age=get(ctx, json_object, "age", int),
+            name=get(ctx, obj, "name", str),
+            age=get(ctx, obj, "age", int),
         )
 
     @classmethod
@@ -57,8 +57,8 @@ user = User(name="Alice", age=30)
 path = Path("user.json")
 
 # Convert the instance to a JSON object.
-json_object = user.to_json_object(ctx)
-print(json_object)
+obj = user.to_json_object(ctx)
+print(obj)
 # {'name': 'Alice', 'age': 30}
 
 # Write the instance to a JSON file.
@@ -77,10 +77,10 @@ from jocl import JsonContext, JsonObject, require
 
 
 @classmethod
-def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "User":
+def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "User":
     return cls(
-        name=require(ctx, json_object, "name", str),
-        age=require(ctx, json_object, "age", int),
+        name=require(ctx, obj, "name", str),
+        age=require(ctx, obj, "age", int),
     )
 ```
 
@@ -116,10 +116,10 @@ class Address(JsonObjectConvertible):
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "Address":
+    def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "Address":
         return cls(
-            city=get(ctx, json_object, "city", str),
-            country=get(ctx, json_object, "country", str),
+            city=get(ctx, obj, "city", str),
+            country=get(ctx, obj, "country", str),
         )
 
     @classmethod
@@ -137,9 +137,9 @@ class Tag(JsonObjectConvertible):
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "Tag":
+    def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "Tag":
         return cls(
-            name=get(ctx, json_object, "name", str),
+            name=get(ctx, obj, "name", str),
         )
 
     @classmethod
@@ -163,12 +163,12 @@ class User(JsonObjectConvertible):
         }
 
     @classmethod
-    def from_json_object(cls, ctx: JsonContext, json_object: JsonObject) -> "User":
+    def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "User":
         return cls(
-            user_id=get(ctx, json_object, "user_id", (int, str)),
-            name=get(ctx, json_object, "name", str),
-            address=get(ctx, json_object, "address", Address),
-            tags=get(ctx, json_object, "tags", ArrayOf(Tag)),
+            user_id=get(ctx, obj, "user_id", (int, str)),
+            name=get(ctx, obj, "name", str),
+            address=get(ctx, obj, "address", Address),
+            tags=get(ctx, obj, "tags", ArrayOf(Tag)),
         )
 
     @classmethod
@@ -220,15 +220,15 @@ After accessing the fields, you can inspect the collected issues and print them.
 from jocl import JsonContext, JsonObject, get
 
 
-json_object: JsonObject = {
+obj: JsonObject = {
     "name": 123,
     # "age" is missing
 }
 
 ctx = JsonContext()
 
-name = get(ctx, json_object, "name", str, default="default name")
-age = get(ctx, json_object, "age", int, default=456)
+name = get(ctx, obj, "name", str, default="default name")
+age = get(ctx, obj, "age", int, default=456)
 
 print(name)
 print(age)
