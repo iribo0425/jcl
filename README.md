@@ -34,11 +34,12 @@ class User(JsonObjectConvertible):
     name: str = ""
     age: int = 0
 
-    def to_json_object(self, ctx: JsonContext) -> JsonObject:
-        return {
-            "name": self.name,
-            "age": self.age,
-        }
+    @classmethod
+    def can_convert_from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> bool:
+        return True
+
+    def can_convert_to_json_object(self, ctx: JsonContext) -> bool:
+        return True
 
     @classmethod
     def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "User":
@@ -46,6 +47,12 @@ class User(JsonObjectConvertible):
             name=get(ctx, obj, "name", str),
             age=get(ctx, obj, "age", int),
         )
+
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
+        return {
+            "name": self.name,
+            "age": self.age,
+        }
 
     @classmethod
     def create_default(cls) -> "User":
@@ -109,11 +116,12 @@ class Address(JsonObjectConvertible):
     city: str = ""
     country: str = ""
 
-    def to_json_object(self, ctx: JsonContext) -> JsonObject:
-        return {
-            "city": self.city,
-            "country": self.country,
-        }
+    @classmethod
+    def can_convert_from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> bool:
+        return True
+
+    def can_convert_to_json_object(self, ctx: JsonContext) -> bool:
+        return True
 
     @classmethod
     def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "Address":
@@ -121,6 +129,12 @@ class Address(JsonObjectConvertible):
             city=get(ctx, obj, "city", str),
             country=get(ctx, obj, "country", str),
         )
+
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
+        return {
+            "city": self.city,
+            "country": self.country,
+        }
 
     @classmethod
     def create_default(cls) -> "Address":
@@ -131,16 +145,23 @@ class Address(JsonObjectConvertible):
 class Tag(JsonObjectConvertible):
     name: str = ""
 
-    def to_json_object(self, ctx: JsonContext) -> JsonObject:
-        return {
-            "name": self.name,
-        }
+    @classmethod
+    def can_convert_from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> bool:
+        return True
+
+    def can_convert_to_json_object(self, ctx: JsonContext) -> bool:
+        return True
 
     @classmethod
     def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "Tag":
         return cls(
             name=get(ctx, obj, "name", str),
         )
+
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
+        return {
+            "name": self.name,
+        }
 
     @classmethod
     def create_default(cls) -> "Tag":
@@ -154,13 +175,12 @@ class User(JsonObjectConvertible):
     address: Address = field(default_factory=Address.create_default)
     tags: list[Tag] = field(default_factory=list)
 
-    def to_json_object(self, ctx: JsonContext) -> JsonObject:
-        return {
-            "user_id": self.user_id,
-            "name": self.name,
-            "address": from_convertible(ctx, "address", self.address),
-            "tags": from_convertibles(ctx, "tags", self.tags),
-        }
+    @classmethod
+    def can_convert_from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> bool:
+        return True
+
+    def can_convert_to_json_object(self, ctx: JsonContext) -> bool:
+        return True
 
     @classmethod
     def from_json_object(cls, ctx: JsonContext, obj: JsonObject) -> "User":
@@ -170,6 +190,14 @@ class User(JsonObjectConvertible):
             address=get(ctx, obj, "address", Address),
             tags=get(ctx, obj, "tags", ArrayOf(Tag)),
         )
+
+    def to_json_object(self, ctx: JsonContext) -> JsonObject:
+        return {
+            "user_id": self.user_id,
+            "name": self.name,
+            "address": from_convertible(ctx, "address", self.address),
+            "tags": from_convertibles(ctx, "tags", self.tags),
+        }
 
     @classmethod
     def create_default(cls) -> "User":
