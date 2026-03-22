@@ -534,6 +534,48 @@ class JsonObjectConvertible(abc.ABC):
 
     @classmethod
     @abc.abstractmethod
+    def can_convert_from_json_object(cls: type[T_JsonObjectConvertible], ctx: JsonContext, obj: JsonObject) -> bool:
+        """Returns whether ``obj`` should be treated as convertible to this type.
+
+        This method is used as a lightweight pre-check before ``from_json_object()`` is called.
+        Returning ``False`` indicates that the object should be skipped as a conversion candidate rather than reported as a deserialization failure.
+
+        Args:
+            ctx: Current JSON context, including the current path.
+            obj: Source JSON object.
+
+        Returns:
+            ``True`` if ``obj`` should be deserialized as this type, otherwise ``False``.
+
+        Raises:
+            TypeError: Raised when the convertibility check encounters a type-related error.
+            ValueError: Raised when the convertibility check encounters an invalid value.
+        """
+        ...
+
+
+    @abc.abstractmethod
+    def can_convert_to_json_object(self, ctx: JsonContext) -> bool:
+        """Returns whether this instance should be treated as convertible to a JSON object.
+
+        This method is used as a lightweight pre-check before ``to_json_object()`` is called.
+        Returning ``False`` indicates that the instance should be skipped where skipping is supported, such as in ``from_convertibles()``.
+
+        Args:
+            ctx: Current JSON context, including the current path.
+
+        Returns:
+            ``True`` if this instance should be serialized to a JSON object, otherwise ``False``.
+
+        Raises:
+            TypeError: Raised when the convertibility check encounters a type-related error.
+            ValueError: Raised when the convertibility check encounters an invalid value.
+        """
+        ...
+
+
+    @classmethod
+    @abc.abstractmethod
     def from_json_object(cls: type[T_JsonObjectConvertible], ctx: JsonContext, obj: JsonObject) -> T_JsonObjectConvertible:
         """Creates an instance from a JSON object.
 
@@ -581,9 +623,6 @@ class JsonObjectConvertible(abc.ABC):
             A newly created default instance.
         """
         ...
-
-
-T_Convertible = TypeVar("T_Convertible", bound=JsonObjectConvertible)
 
 
 def _escape_json_pointer_part(part: str) -> str:
@@ -894,16 +933,26 @@ def dump_convertible(ctx: JsonContext, convertible: JsonObjectConvertible, path:
         ``None``.
 
     Raises:
-        TypeError: Raised when ``to_json_object()`` returns an invalid JSON object, plus any ``TypeError`` raised directly by ``to_json_object()``.
+        TypeError: Raised when ``convertible`` is not convertible to a JSON object,
+            when ``to_json_object()`` returns an invalid JSON object, plus any
+            ``TypeError`` raised directly by ``to_json_object()``.
         ValueError: Raised when ``to_json_object()`` fails with an invalid value.
         OSError: Raised when writing the file fails.
     """
+    if not convertible.can_convert_to_json_object(ctx):
+        raise TypeError(
+            f"{type(convertible).__name__} is not convertible to a JSON object "
+            f"at {_format_json_location(ctx.get_path())}"
+        )
+
     o: JsonObject = convertible.to_json_object(ctx)
 
     try:
         validate_json_object(ctx, o)
     except JsonError as e:
-        raise TypeError(f"Invalid JSON object produced by {type(convertible).__name__} for {path}: {e}") from e
+        raise TypeError(
+            f"Invalid JSON object produced by {type(convertible).__name__} for {path}: {e}"
+        ) from e
 
     s: str = json.dumps(o, ensure_ascii=False, allow_nan=False, indent=4, sort_keys=True)
     path.write_text(s, encoding="utf-8")
@@ -926,9 +975,10 @@ T = TypeVar("T", bound=JsonObjectConvertible)
 def load_convertible(ctx: JsonContext, cls: type[T], path: pathlib.Path) -> T:
     """Loads and deserializes an object from a JSON file.
 
-    Parsing rejects non-finite floats and invalid JSON constants before validation and deserialization begin.
-    After successful object validation, deserialization is performed with shallow container validation enabled.
-    Deserialization failures are normalized to ``TypeError``.
+    Parsing rejects non-finite floats and invalid JSON constants before validation
+    and deserialization begin. After successful object validation, deserialization
+    is performed with shallow container validation enabled. Deserialization failures
+    are normalized to ``TypeError``.
 
     Args:
         ctx: Current JSON context, including the current path.
@@ -940,7 +990,9 @@ def load_convertible(ctx: JsonContext, cls: type[T], path: pathlib.Path) -> T:
 
     Raises:
         ValueError: Raised when JSON parsing fails.
-        TypeError: Raised when the parsed value is not a valid JSON object or when deserialization fails.
+        TypeError: Raised when the parsed value is not a valid JSON object, when
+            ``cls`` is not convertible from the parsed JSON object, or when
+            deserialization fails.
         OSError: Raised when reading the file fails.
     """
     s: str = path.read_text(encoding="utf-8")
@@ -956,9 +1008,16 @@ def load_convertible(ctx: JsonContext, cls: type[T], path: pathlib.Path) -> T:
         raise TypeError(f"Invalid JSON object in {path}: {e}") from e
 
     validated_ctx: JsonContext = ctx.create_with_use_shallow_validation(True)
+    json_obj: JsonObject = cast(JsonObject, o)
+
+    if not cls.can_convert_from_json_object(validated_ctx, json_obj):
+        raise TypeError(
+            f"{cls.__name__} is not convertible from the JSON object in {path} "
+            f"at {_format_json_location(validated_ctx.get_path())}"
+        )
 
     try:
-        return cls.from_json_object(validated_ctx, cast(JsonObject, o))
+        return cls.from_json_object(validated_ctx, json_obj)
     except (JsonError, TypeError, ValueError) as e:
         raise TypeError(f"Failed to deserialize {cls.__name__} from {path}: {e}") from e
 
@@ -1144,12 +1203,17 @@ def _resolve_default_value(default: object, types: tuple[object, ...]) -> object
     raise TypeError(f"Unsupported get type: {first_type!r}")
 
 
-def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[object, ...]) -> tuple[bool, object, Optional[_GetIssueInfo]]:
+def _try_read_value_as_types(
+    ctx: JsonContext,
+    value: object,
+    types: tuple[object, ...],
+) -> tuple[bool, object, Optional[_GetIssueInfo]]:
     if not types:
         raise ValueError("types must not be empty")
 
     if len(types) > 1:
         errors: list[_GetIssueInfo] = []
+        skipped: bool = False
 
         for t in types:
             ok, result, error = _try_read_value_as_types(ctx, value, (t,))
@@ -1157,8 +1221,14 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
             if ok:
                 return True, result, None
 
-            if error is not None:
-                errors.append(error)
+            if error is None:
+                skipped = True
+                continue
+
+            errors.append(error)
+
+        if not errors and skipped:
+            return False, None, None
 
         best_error: Optional[_GetIssueInfo] = None
 
@@ -1242,7 +1312,6 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
         raise AssertionError("Unreachable: expected exactly one type candidate")
 
     expected_type: object = types[0]
-
     use_shallow_validation: bool = ctx.get_use_shallow_validation()
 
     if isinstance(expected_type, ArrayOf):
@@ -1253,7 +1322,11 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_array(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
@@ -1263,7 +1336,7 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
             ok, result, error = _try_read_value_as_types(
                 ctx.create_child(i),
                 item,
-                _normalize_type_or_types(expected_type.get_element_types())
+                _normalize_type_or_types(expected_type.get_element_types()),
             )
 
             if not ok:
@@ -1281,7 +1354,11 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_object(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
@@ -1291,7 +1368,7 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
             ok, result, error = _try_read_value_as_types(
                 ctx.create_child(k),
                 item,
-                _normalize_type_or_types(expected_type.get_value_types())
+                _normalize_type_or_types(expected_type.get_value_types()),
             )
 
             if not ok:
@@ -1303,36 +1380,63 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
 
     if expected_type is str:
         if not isinstance(value, str):
-            return False, None, _GetIssueInfo(ctx.get_path(), JsonIssueCode.INVALID_TYPE, f"Expected string, got {type(value).__name__}", value)
-
+            return False, None, _GetIssueInfo(
+                ctx.get_path(),
+                JsonIssueCode.INVALID_TYPE,
+                f"Expected string, got {type(value).__name__}",
+                value,
+            )
         return True, value, None
 
     if expected_type is int:
         if not _is_strict_int(value):
-            return False, None, _GetIssueInfo(ctx.get_path(), JsonIssueCode.INVALID_TYPE, f"Expected integer, got {type(value).__name__}", value)
-
+            return False, None, _GetIssueInfo(
+                ctx.get_path(),
+                JsonIssueCode.INVALID_TYPE,
+                f"Expected integer, got {type(value).__name__}",
+                value,
+            )
         return True, cast(int, value), None
 
     if expected_type is float:
         if _is_strict_int(value):
             try:
                 return True, float(cast(int, value)), None
-
             except OverflowError as e:
-                return False, None, _GetIssueInfo(ctx.get_path(), JsonIssueCode.VALUE_CONVERSION_FAILED, "Integer too large to convert to float", value, e)
+                return False, None, _GetIssueInfo(
+                    ctx.get_path(),
+                    JsonIssueCode.VALUE_CONVERSION_FAILED,
+                    "Integer too large to convert to float",
+                    value,
+                    e,
+                )
 
         if isinstance(value, float):
             if math.isfinite(value):
                 return True, value, None
 
-            return False, None, _GetIssueInfo(ctx.get_path(), JsonIssueCode.INVALID_VALUE, "Non-finite float", value)
+            return False, None, _GetIssueInfo(
+                ctx.get_path(),
+                JsonIssueCode.INVALID_VALUE,
+                "Non-finite float",
+                value,
+            )
 
-        return False, None, _GetIssueInfo(ctx.get_path(), JsonIssueCode.INVALID_TYPE, f"Expected number, got {type(value).__name__}", value)
+        return False, None, _GetIssueInfo(
+            ctx.get_path(),
+            JsonIssueCode.INVALID_TYPE,
+            f"Expected number, got {type(value).__name__}",
+            value,
+        )
 
     if expected_type is bool:
         if not isinstance(value, bool):
-            return False, None, _GetIssueInfo(ctx.get_path(), JsonIssueCode.INVALID_TYPE, f"Expected boolean, got {type(value).__name__}", value)
-
+            return False, None, _GetIssueInfo(
+                ctx.get_path(),
+                JsonIssueCode.INVALID_TYPE,
+                f"Expected boolean, got {type(value).__name__}",
+                value,
+            )
         return True, value, None
 
     if expected_type is JsonPrimitive:
@@ -1343,7 +1447,11 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_primitive(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
@@ -1357,7 +1465,11 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_object(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
@@ -1371,7 +1483,11 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_array(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
@@ -1385,7 +1501,11 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_value(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
@@ -1393,47 +1513,43 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
 
     if isinstance(expected_type, type) and issubclass(expected_type, enum.IntEnum):
         if not _is_strict_int(value):
-            issue_info: _GetIssueInfo = _GetIssueInfo(
+            return False, None, _GetIssueInfo(
                 ctx.get_path(),
                 JsonIssueCode.INVALID_TYPE,
                 f"Expected integer for {expected_type.__name__}, got {type(value).__name__}",
                 value,
             )
-            return False, None, issue_info
 
         try:
             return True, expected_type(cast(int, value)), None
         except ValueError as e:
-            issue_info = _GetIssueInfo(
+            return False, None, _GetIssueInfo(
                 ctx.get_path(),
                 JsonIssueCode.INVALID_VALUE,
                 f"Invalid {expected_type.__name__} value: {value!r}",
                 value,
                 e,
             )
-            return False, None, issue_info
 
     if isinstance(expected_type, type) and issubclass(expected_type, StrEnum):
         if not isinstance(value, str):
-            issue_info = _GetIssueInfo(
+            return False, None, _GetIssueInfo(
                 ctx.get_path(),
                 JsonIssueCode.INVALID_TYPE,
                 f"Expected string for {expected_type.__name__}, got {type(value).__name__}",
                 value,
             )
-            return False, None, issue_info
 
         try:
             return True, expected_type(value), None
         except ValueError as e:
-            issue_info = _GetIssueInfo(
+            return False, None, _GetIssueInfo(
                 ctx.get_path(),
                 JsonIssueCode.INVALID_VALUE,
                 f"Invalid {expected_type.__name__} value: {value!r}",
                 value,
                 e,
             )
-            return False, None, issue_info
 
     if isinstance(expected_type, type) and issubclass(expected_type, JsonObjectConvertible):
         try:
@@ -1443,16 +1559,31 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
                 validate_json_object(ctx, value)
 
         except JsonError as e:
-            issue_code: JsonIssueCode = JsonIssueCode.INVALID_TYPE if e.get_path() == ctx.get_path() else JsonIssueCode.INVALID_VALUE
+            issue_code: JsonIssueCode = (
+                JsonIssueCode.INVALID_TYPE
+                if e.get_path() == ctx.get_path()
+                else JsonIssueCode.INVALID_VALUE
+            )
             issue_value: object = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
             return False, None, _GetIssueInfo(e.get_path(), issue_code, _get_exception_reason(e), issue_value, e)
 
+        json_obj: JsonObject = cast(JsonObject, value)
+
+        if not expected_type.can_convert_from_json_object(ctx, json_obj):
+            return False, None, None
+
         try:
-            return True, expected_type.from_json_object(ctx, cast(JsonObject, value)), None
+            return True, expected_type.from_json_object(ctx, json_obj), None
 
         except JsonError as e:
             issue_value = value if e.get_path() == ctx.get_path() else _MISSING_ISSUE_VALUE
-            return False, None, _GetIssueInfo(e.get_path(), JsonIssueCode.INVALID_VALUE, _get_exception_reason(e), issue_value, e)
+            return False, None, _GetIssueInfo(
+                e.get_path(),
+                JsonIssueCode.INVALID_VALUE,
+                _get_exception_reason(e),
+                issue_value,
+                e,
+            )
 
         except (TypeError, ValueError) as e:
             return False, None, _GetIssueInfo(
@@ -1469,7 +1600,9 @@ def _try_read_value_as_types(ctx: JsonContext, value: object, types: tuple[objec
 def get(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object, *, default: object = _MISSING_DEFAULT) -> Any:
     """Reads ``key`` from a JSON object as ``type_or_types``.
 
-    If the key is missing or the value cannot be read as the requested type, this function records a ``JsonIssue`` and returns either ``default`` or an inferred default value.
+    If the key is missing, or if the value cannot be read as any requested type, this function returns either ``default`` or an inferred default value.
+    A ``JsonIssue`` is recorded for missing keys and conversion failures that produce error information.
+    Candidates rejected only by ``can_convert_from_json_object()`` are skipped without recording an issue.
 
     Args:
         ctx: Current JSON context, including the current path.
@@ -1501,14 +1634,14 @@ def get(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object, *, d
         return result
 
     if error is None:
-        raise AssertionError("Unreachable: typed read failed without error information")
+        return _resolve_default_value(default, types)
 
     error_ctx: JsonContext = JsonContext(
         path=error.get_path(),
         max_depth=ctx.get_max_depth(),
         issues=ctx.get_issues(),
         max_issue_value_repr_length=ctx.get_max_issue_value_repr_length(),
-        use_shallow_validation=ctx.get_use_shallow_validation()
+        use_shallow_validation=ctx.get_use_shallow_validation(),
     )
 
     _record_get_issue(
@@ -1526,6 +1659,7 @@ def require(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object) 
     """Reads ``key`` from a JSON object as ``type_or_types``.
 
     Unlike ``get()``, this function raises an exception instead of recording an issue and returning a default value.
+    Candidates rejected only by ``can_convert_from_json_object()`` are treated as non-convertible and do not produce a ``JsonIssue``.
 
     Args:
         ctx: Current JSON context, including the current path.
@@ -1538,7 +1672,7 @@ def require(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object) 
 
     Raises:
         JsonError: Raised when the key is missing or when JSON validation fails under this module's rules.
-        TypeError: Raised when deserialization encounters a type-related error, or when ``type_or_types`` contains an unsupported type.
+        TypeError: Raised when the value is not convertible to any requested type, when deserialization encounters a type-related error, or when ``type_or_types`` contains an unsupported type.
         ValueError: Raised when deserialization encounters a value-related error or when ``type_or_types`` is empty.
     """
     child_ctx: JsonContext = ctx.create_child(key)
@@ -1556,7 +1690,10 @@ def require(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object) 
         return result
 
     if error is None:
-        raise AssertionError("Unreachable: typed read failed without error information")
+        raise TypeError(
+            f"Value is not convertible to the requested type "
+            f"at {_format_json_location(child_ctx.get_path())}"
+        )
 
     exc: Optional[BaseException] = error.get_exc()
 
@@ -1569,7 +1706,8 @@ def require(ctx: JsonContext, obj: JsonObject, key: str, type_or_types: object) 
 def from_convertible(ctx: JsonContext, key: str, convertible: JsonObjectConvertible) -> JsonObject:
     """Converts an object to a validated JSON object.
 
-    The object returned by ``to_json_object()`` is validated with ``key`` appended to ``ctx`` so that failures point to the correct location.
+    The object returned by ``to_json_object()`` is validated with ``key``
+    appended to ``ctx`` so that failures point to the correct location.
     Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
 
     Args:
@@ -1581,17 +1719,27 @@ def from_convertible(ctx: JsonContext, key: str, convertible: JsonObjectConverti
         A validated JSON object.
 
     Raises:
-        TypeError: Raised when the produced value is not a valid JSON object, plus any ``TypeError`` raised directly by ``to_json_object()``.
+        TypeError: Raised when ``convertible`` is not convertible to a JSON
+            object, when the produced value is not a valid JSON object, plus any
+            ``TypeError`` raised directly by ``to_json_object()``.
         ValueError: Raised when ``to_json_object()`` fails with an invalid value.
     """
     child_ctx: JsonContext = ctx.create_child(key)
+
+    if not convertible.can_convert_to_json_object(child_ctx):
+        raise TypeError(
+            f"{type(convertible).__name__} is not convertible to a JSON object "
+            f"at {_format_json_location(child_ctx.get_path())}"
+        )
 
     obj: JsonObject = convertible.to_json_object(child_ctx)
 
     try:
         validate_json_object(child_ctx, obj)
     except JsonError as e:
-        raise TypeError(f"Invalid JSON object produced by {type(convertible).__name__} for key {key!r}: {e}") from e
+        raise TypeError(
+            f"Invalid JSON object produced by {type(convertible).__name__} for key {key!r}: {e}"
+        ) from e
 
     return obj
 
@@ -1601,6 +1749,7 @@ def from_convertibles(ctx: JsonContext, key: str, convertibles: Iterable[JsonObj
 
     Each object returned by ``to_json_object()`` is validated with both ``key`` and the element index appended to ``ctx`` so that failures point to the offending element.
     Exceptions raised directly by ``to_json_object()`` are propagated unchanged.
+    Elements for which ``can_convert_to_json_object()`` returns ``False`` are skipped.
 
     Args:
         ctx: Current JSON context, including the current path.
@@ -1609,23 +1758,30 @@ def from_convertibles(ctx: JsonContext, key: str, convertibles: Iterable[JsonObj
 
     Returns:
         A list of validated JSON objects.
+        The output may contain fewer elements than ``convertibles`` when non-convertible elements are skipped.
 
     Raises:
         TypeError: Raised when any produced value is not a valid JSON object, plus any ``TypeError`` raised directly by an element's ``to_json_object()``.
         ValueError: Raised when element serialization fails with an invalid value.
     """
     child_ctx: JsonContext = ctx.create_child(key)
-
     json_objects: list[JsonObject] = []
 
     for i, convertible in enumerate(convertibles):
         item_ctx: JsonContext = child_ctx.create_child(i)
+
+        if not convertible.can_convert_to_json_object(item_ctx):
+            continue
+
         obj: JsonObject = convertible.to_json_object(item_ctx)
 
         try:
             validate_json_object(item_ctx, obj)
         except JsonError as e:
-            raise TypeError(f"Invalid JSON object produced by element {i} ({type(convertible).__name__}) for key {key!r}: {e}") from e
+            raise TypeError(
+                f"Invalid JSON object produced by element {i} "
+                f"({type(convertible).__name__}) for key {key!r}: {e}"
+            ) from e
 
         json_objects.append(obj)
 
